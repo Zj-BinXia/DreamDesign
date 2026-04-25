@@ -1804,6 +1804,229 @@ def _solid_fill_spec_from_node(node: ET.Element) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _background_fill_from_color_spec(color_spec: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(color_spec, dict):
+        return None
+    out: Dict[str, Any] = {"type": "solid"}
+    color_type = str(color_spec.get("type") or "").lower()
+    if color_type in {"rgb", "srgb"} and color_spec.get("rgb"):
+        out.update({"color_type": "RGB", "rgb": str(color_spec.get("rgb")).upper()})
+    elif color_type == "scheme" and color_spec.get("scheme"):
+        out.update({"color_type": "SCHEME", "scheme": color_spec.get("scheme")})
+    if color_spec.get("mods"):
+        out["mods"] = list(color_spec.get("mods") or [])
+    return out
+
+
+def _gradient_fill_spec_from_node(node: ET.Element) -> Optional[Dict[str, Any]]:
+    grad = node.find("a:gradFill", NS)
+    if grad is None and node.tag.rsplit("}", 1)[-1] == "gradFill":
+        grad = node
+    if grad is None:
+        return None
+
+    out: Dict[str, Any] = {"type": "gradient"}
+    stops: List[Dict[str, Any]] = []
+    gs_lst = grad.find("a:gsLst", NS)
+    if gs_lst is not None:
+        for gs in gs_lst.findall("a:gs", NS):
+            stop: Dict[str, Any] = {}
+            if gs.get("pos") is not None:
+                try:
+                    stop["pos"] = int(gs.get("pos"))
+                except Exception:
+                    stop["pos"] = gs.get("pos")
+
+            color_spec: Optional[Dict[str, Any]] = None
+            for child in list(gs):
+                color_spec = _color_spec_from_color_el(child)
+                if color_spec is not None:
+                    break
+
+            if color_spec is not None:
+                color_type = str(color_spec.get("type") or "").lower()
+                if color_type in {"rgb", "srgb"} and color_spec.get("rgb"):
+                    stop.update({"color_type": "RGB", "rgb": str(color_spec.get("rgb")).upper()})
+                elif color_type == "scheme" and color_spec.get("scheme"):
+                    stop.update({"color_type": "SCHEME", "scheme": color_spec.get("scheme")})
+                if color_spec.get("mods"):
+                    stop["mods"] = list(color_spec.get("mods") or [])
+            if stop:
+                stops.append(stop)
+
+    if stops:
+        out["stops"] = stops
+        first_stop = next((stop for stop in stops if isinstance(stop, dict)), None)
+        if isinstance(first_stop, dict):
+            if first_stop.get("color_type") == "RGB" and first_stop.get("rgb"):
+                out.update({"color_type": "RGB", "rgb": first_stop.get("rgb")})
+            elif first_stop.get("color_type") == "SCHEME" and first_stop.get("scheme"):
+                out.update({"color_type": "SCHEME", "scheme": first_stop.get("scheme")})
+            if first_stop.get("mods"):
+                out["mods"] = list(first_stop.get("mods") or [])
+
+    lin = grad.find("a:lin", NS)
+    if lin is not None and lin.get("ang") is not None:
+        try:
+            out["angle"] = int(lin.get("ang"))
+        except Exception:
+            out["angle"] = lin.get("ang")
+
+    path = grad.find("a:path", NS)
+    if path is not None and path.get("path"):
+        out["path"] = path.get("path")
+
+    return out if len(out) > 1 else None
+
+
+def _gradient_stop_rgba(stop: Dict[str, Any]) -> Optional[tuple[int, int, int, float]]:
+    if not isinstance(stop, dict):
+        return None
+    if str(stop.get("color_type") or "").upper() != "RGB":
+        return None
+    rgb = str(stop.get("rgb") or "").strip().lstrip("#")
+    if len(rgb) != 6:
+        return None
+    try:
+        r = int(rgb[0:2], 16)
+        g = int(rgb[2:4], 16)
+        b = int(rgb[4:6], 16)
+    except Exception:
+        return None
+
+    alpha = 1.0
+    for mod in stop.get("mods") or []:
+        if not isinstance(mod, dict):
+            continue
+        if str(mod.get("op") or "").lower() != "alpha":
+            continue
+        try:
+            alpha = max(0.0, min(1.0, float(mod.get("val")) / 100000.0))
+        except Exception:
+            alpha = 1.0
+        break
+    return r, g, b, alpha
+
+
+def _gradient_fill_to_svg(
+    gradient_spec: Dict[str, Any], out_w: int, out_h: int
+) -> Optional[str]:
+    if out_w <= 0 or out_h <= 0:
+        return None
+
+    stops_svg: List[str] = []
+    for stop in gradient_spec.get("stops") or []:
+        rgba = _gradient_stop_rgba(stop)
+        if rgba is None:
+            continue
+        r, g, b, alpha = rgba
+        try:
+            pos = max(0.0, min(1.0, float(stop.get("pos", 0)) / 100000.0))
+        except Exception:
+            pos = 0.0
+        stops_svg.append(
+            f'<stop offset="{pos * 100:.4f}%" stop-color="rgb({r},{g},{b})" stop-opacity="{alpha:.6f}"/>'
+        )
+    if not stops_svg:
+        return None
+
+    gradient_markup = ""
+    if str(gradient_spec.get("path") or "").lower() == "circle":
+        gradient_markup = (
+            '<radialGradient id="bggrad" cx="50%" cy="50%" r="70.710678%" '
+            'fx="50%" fy="50%">'
+            + "".join(stops_svg)
+            + "</radialGradient>"
+        )
+    else:
+        try:
+            angle_deg = float(gradient_spec.get("angle") or 0.0) / 60000.0
+        except Exception:
+            angle_deg = 0.0
+        theta = math.radians(angle_deg)
+        dx = math.cos(theta)
+        dy = -math.sin(theta)
+        x1 = 50.0 - (dx * 50.0)
+        y1 = 50.0 - (dy * 50.0)
+        x2 = 50.0 + (dx * 50.0)
+        y2 = 50.0 + (dy * 50.0)
+        gradient_markup = (
+            f'<linearGradient id="bggrad" x1="{x1:.4f}%" y1="{y1:.4f}%" '
+            f'x2="{x2:.4f}%" y2="{y2:.4f}%">'
+            + "".join(stops_svg)
+            + "</linearGradient>"
+        )
+
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{out_w}" height="{out_h}" '
+        f'viewBox="0 0 {out_w} {out_h}">'
+        "<defs>"
+        f"{gradient_markup}"
+        "</defs>"
+        f'<rect x="0" y="0" width="{out_w}" height="{out_h}" fill="url(#bggrad)"/>'
+        "</svg>"
+    )
+
+
+def _svg_bytes_to_png_bytes(svg_bytes: bytes, out_w: int, out_h: int) -> Optional[bytes]:
+    try:
+        import cairosvg  # type: ignore
+    except Exception:
+        try:
+            libdir = "/opt/homebrew/lib"
+            prev = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH") or ""
+            parts = [p for p in prev.split(":") if p]
+            if libdir not in parts:
+                os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join([libdir] + parts)
+            prev2 = os.environ.get("DYLD_LIBRARY_PATH") or ""
+            parts2 = [p for p in prev2.split(":") if p]
+            if libdir not in parts2:
+                os.environ["DYLD_LIBRARY_PATH"] = ":".join([libdir] + parts2)
+            for k in list(sys.modules.keys()):
+                if k == "cairosvg" or k.startswith("cairosvg.") or k == "cairocffi" or k.startswith("cairocffi."):
+                    del sys.modules[k]
+            cairosvg = importlib.import_module("cairosvg")
+        except Exception:
+            return None
+    try:
+        return cairosvg.svg2png(bytestring=svg_bytes, output_width=out_w, output_height=out_h)
+    except Exception:
+        return None
+
+
+def _export_gradient_background_layer(
+    gradient_spec: Dict[str, Any],
+    slide_index: int,
+    slide_width_emu: int,
+    slide_height_emu: int,
+    assets_dir: Path,
+    *,
+    suffix: str = "gradient",
+) -> Optional[Dict[str, Any]]:
+    full_box_emu = (0, 0, int(slide_width_emu), int(slide_height_emu))
+    out_w, out_h = _raster_size_2048_for_box(full_box_emu)
+    svg_text = _gradient_fill_to_svg(gradient_spec, out_w, out_h)
+    if not svg_text:
+        return None
+    png_bytes = _svg_bytes_to_png_bytes(svg_text.encode("utf-8"), out_w, out_h)
+    if not png_bytes:
+        return None
+
+    out_path = assets_dir / f"slide{slide_index:03d}_background_{suffix}.png"
+    try:
+        Image.open(io.BytesIO(png_bytes)).convert("RGBA").save(out_path, format="PNG")
+    except Exception:
+        return None
+
+    return {
+        "slide": slide_index,
+        "shape_name": "slide_background_gradient",
+        "kind": "svg_image_png_rgba",
+        "box": {"left": 0.0, "top": 0.0, "width": 1.0, "height": 1.0},
+        "saved_path": str(out_path),
+    }
+
+
 def _style_ref_color_spec_from_root(root: ET.Element, ref_name: str) -> Optional[Dict[str, Any]]:
     ref = root.find(f".//p:style/a:{ref_name}", NS)
     if ref is None:
@@ -2476,11 +2699,18 @@ def extract_table_layer(
     }
 
 
-def extract_slide_background_layers(slide, slide_index: int, assets_dir: Path) -> List[Dict[str, Any]]:
+def extract_slide_background_layers(
+    slide, slide_index: int, assets_dir: Path, slide_width_emu: int, slide_height_emu: int
+) -> List[Dict[str, Any]]:
     el = getattr(slide, "_element", None)
     if el is None or not hasattr(el, "xpath"):
         return []
     out: List[Dict[str, Any]] = []
+    bg_pr = None
+    try:
+        bg_pr = el.find(".//p:bg/p:bgPr", NS)
+    except Exception:
+        bg_pr = None
     blips = el.xpath(".//p:bg//a:blip[@r:embed]")
     for idx, blip in enumerate(blips, start=1):
         r_id = blip.get(qn("r:embed"))
@@ -2516,6 +2746,17 @@ def extract_slide_background_layers(slide, slide_index: int, assets_dir: Path) -
                 "source": "slide_background",
             }
         )
+    gradient_spec = _gradient_fill_spec_from_node(bg_pr) if bg_pr is not None else None
+    if gradient_spec is not None:
+        gradient_layer = _export_gradient_background_layer(
+            gradient_spec,
+            slide_index,
+            slide_width_emu,
+            slide_height_emu,
+            assets_dir,
+        )
+        if gradient_layer is not None:
+            out.append(gradient_layer)
     return out
 
 
@@ -2537,22 +2778,15 @@ def extract_slide_background_fill(slide) -> Optional[Dict[str, Any]]:
     result: Dict[str, Any] = {}
 
     if bg_pr is not None:
-        solid = bg_pr.find(qn("a:solidFill"))
-        if solid is None:
-            return result or None
+        solid_spec = _background_fill_from_color_spec(_solid_fill_spec_from_node(bg_pr))
+        if solid_spec is not None:
+            return solid_spec
 
-        srgb = solid.find(qn("a:srgbClr"))
-        if srgb is not None and srgb.get("val"):
-            result.update({"type": "solid", "color_type": "RGB", "rgb": srgb.get("val").upper()})
-            return result
+        gradient_spec = _gradient_fill_spec_from_node(bg_pr)
+        if gradient_spec is not None:
+            return None
 
-        scheme = solid.find(qn("a:schemeClr"))
-        if scheme is not None and scheme.get("val"):
-            result.update({"type": "solid", "color_type": "SCHEME", "scheme": scheme.get("val")})
-            return result
-
-        result.update({"type": "solid"})
-        return result
+        return result or None
 
     # Background may be a theme reference rather than a concrete bgPr.
     if bg_ref is not None:
@@ -2580,7 +2814,6 @@ def extract_slide_canvas_layer(
         "canvas_width_emu": int(slide_width_emu),
         "canvas_height_emu": int(slide_height_emu),
         "background_fill": dict(background_fill) if background_fill else None,
-        "source": "slide_canvas",
     }
 
 
@@ -2840,7 +3073,7 @@ def main() -> None:
             layers.append(layer)
 
         # Background image is the bottom-most layer, append at the end (bottom).
-        for layer in extract_slide_background_layers(slide, si, assets_dir):
+        for layer in extract_slide_background_layers(slide, si, assets_dir, int(prs.slide_width), int(prs.slide_height)):
             per_slide_index += 1
             layer["shape_name"] = per_slide_index
             layers.append(layer)
