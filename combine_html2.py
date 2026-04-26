@@ -1346,13 +1346,19 @@ def _is_normalized_custom_path(path: Dict[str, Any]) -> bool:
 def _render_geo_layer(layer: Dict[str, Any]) -> str:
     box_style = _box_to_style(layer.get("box"))
     transform = _transform_css(layer)
-    fill = _css_color_from_spec(layer.get("fill"))
+    shape_xml = layer.get("shape_xml") or {}
+    fill_spec = layer.get("fill")
     line = layer.get("line") or {}
+    if isinstance(shape_xml, dict) and shape_xml.get("format") == "shape_spec_v1":
+        if fill_spec is None:
+            fill_spec = shape_xml.get("fill")
+        if not line and isinstance(shape_xml.get("line"), dict):
+            line = shape_xml.get("line") or {}
+    fill = _css_color_from_spec(fill_spec)
     stroke = _css_color_from_spec(line.get("color"), "transparent")
     stroke_width = float(line.get("width_pt") or 0.0)
     dash_array = _dash_array(line.get("dash"))
     dash_attr = f' stroke-dasharray="{dash_array}"' if dash_array else ""
-    shape_xml = layer.get("shape_xml") or {}
     fill_attr = "none" if fill == "transparent" else fill
     stroke_attr = "none" if stroke == "transparent" else stroke
     svg_style = _style_string(["position:absolute", box_style, transform, _layer_zindex_style(layer), "overflow:visible"])

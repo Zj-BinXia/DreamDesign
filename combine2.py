@@ -1863,24 +1863,28 @@ def _add_graph_layer(slide, layer: Dict[str, Any], shift_x: float, shift_y: floa
             except Exception:
                 pass
 
-
         # Fast path: preset geometry like rect/roundRect -> add_shape()
-            prst = str(geom.get("prst") or "")
-            prst_map = {
-                "rect": MSO_AUTO_SHAPE_TYPE.RECTANGLE,
-                "roundRect": MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
-                "ellipse": MSO_AUTO_SHAPE_TYPE.OVAL,
-                "leftBrace": MSO_AUTO_SHAPE_TYPE.LEFT_BRACE,
-                "rightBrace": MSO_AUTO_SHAPE_TYPE.RIGHT_BRACE,
-                "leftBracket": MSO_AUTO_SHAPE_TYPE.LEFT_BRACKET,
-                "rightBracket": MSO_AUTO_SHAPE_TYPE.RIGHT_BRACKET,
-                "bracePair": MSO_AUTO_SHAPE_TYPE.DOUBLE_BRACE,
-                "bracketPair": MSO_AUTO_SHAPE_TYPE.DOUBLE_BRACKET,
-            }
-            ast = prst_map.get(prst)
-            if ast is None:
-                return
-            # Reconstruct rotation around the bbox center for common 90deg cases.
+        prst = str(geom.get("prst") or "")
+        prst_map = {
+            "rect": MSO_AUTO_SHAPE_TYPE.RECTANGLE,
+            "roundRect": MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
+            "roundrect": MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
+            "ellipse": MSO_AUTO_SHAPE_TYPE.OVAL,
+            "leftBrace": MSO_AUTO_SHAPE_TYPE.LEFT_BRACE,
+            "leftbrace": MSO_AUTO_SHAPE_TYPE.LEFT_BRACE,
+            "rightBrace": MSO_AUTO_SHAPE_TYPE.RIGHT_BRACE,
+            "rightbrace": MSO_AUTO_SHAPE_TYPE.RIGHT_BRACE,
+            "leftBracket": MSO_AUTO_SHAPE_TYPE.LEFT_BRACKET,
+            "leftbracket": MSO_AUTO_SHAPE_TYPE.LEFT_BRACKET,
+            "rightBracket": MSO_AUTO_SHAPE_TYPE.RIGHT_BRACKET,
+            "rightbracket": MSO_AUTO_SHAPE_TYPE.RIGHT_BRACKET,
+            "bracePair": MSO_AUTO_SHAPE_TYPE.DOUBLE_BRACE,
+            "bracepair": MSO_AUTO_SHAPE_TYPE.DOUBLE_BRACE,
+            "bracketPair": MSO_AUTO_SHAPE_TYPE.DOUBLE_BRACKET,
+            "bracketpair": MSO_AUTO_SHAPE_TYPE.DOUBLE_BRACKET,
+        }
+        ast = prst_map.get(prst)
+        if ast is not None:
             rot = float(layer.get("rotation_deg") or 0.0)
             if rot:
                 cx = float(left.pt) + float(width.pt) / 2.0
@@ -1903,8 +1907,7 @@ def _add_graph_layer(slide, layer: Dict[str, Any], shift_x: float, shift_y: floa
             fill = shape_xml.get("fill")
             line_style = shape_xml.get("line") if isinstance(shape_xml.get("line"), dict) else None
             _apply_shape_fill_and_line(shp._element.spPr, fill, line_style)
-            # Braces/brackets should be outline-only.
-            if prst in {"leftBrace", "rightBrace", "leftBracket", "rightBracket", "bracePair", "bracketPair"} and not fill:
+            if prst.lower() in {"leftbrace", "rightbrace", "leftbracket", "rightbracket", "bracepair", "bracketpair"} and not fill:
                 try:
                     sppr = shp._element.spPr
                     for child in list(sppr):
@@ -1942,7 +1945,6 @@ def _add_graph_layer(slide, layer: Dict[str, Any], shift_x: float, shift_y: floa
                     _fill_text_frame(shp.text_frame, text_content, _slide_size_pt_from_slide(slide))
                 except Exception:
                     pass
-            # #region debug-point A:prst-geo-rebuild
             try:
                 _dbg_report_method_ppt_style(
                     "A",
@@ -1958,7 +1960,6 @@ def _add_graph_layer(slide, layer: Dict[str, Any], shift_x: float, shift_y: floa
                 )
             except Exception:
                 pass
-            # #endregion
             return
 
         # Another fast path: many background panels are exported as custGeom
