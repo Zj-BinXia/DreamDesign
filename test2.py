@@ -14,14 +14,13 @@ Usage:
 """
 
 import argparse
-import base64
 import io
-import importlib
 import json
 import math
 import os
 import re
-import sys
+import shutil
+import subprocess
 import time
 import zipfile
 from pathlib import Path
@@ -1937,92 +1936,35 @@ def _svg_aspect_ratio(svg_bytes: bytes) -> Optional[float]:
     return None
 
 
-def _svg_bytes_to_png_via_playwright(svg_bytes: bytes, out_w: int, out_h: int) -> Optional[bytes]:
+def _svg_bytes_to_png_via_rsvg_convert(svg_bytes: bytes, out_w: int, out_h: int) -> Optional[bytes]:
+    exe = shutil.which("rsvg-convert")
+    if not exe:
+        return None
     try:
-        sync_api = importlib.import_module("playwright.sync_api")
+        proc = subprocess.run(
+            [
+                exe,
+                "--format",
+                "png",
+                "--width",
+                str(max(1, int(out_w))),
+                "--height",
+                str(max(1, int(out_h))),
+            ],
+            input=svg_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
     except Exception:
         return None
-    target_w = max(1, int(out_w))
-    target_h = max(1, int(out_h))
-    svg_b64 = base64.b64encode(svg_bytes).decode("ascii")
-    html = (
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-        "<style>html,body{margin:0;padding:0;background:transparent;overflow:hidden;}"
-        f"#target{{display:block;width:{target_w}px;height:{target_h}px;}}</style>"
-        "</head><body>"
-        f"<img id=\"target\" src=\"data:image/svg+xml;base64,{svg_b64}\" alt=\"svg\"/>"
-        "</body></html>"
-    )
-    try:
-        with sync_api.sync_playwright() as pw:
-            browser = None
-            last_error = None
-            for kwargs in ({"headless": True}, {"headless": True, "channel": "chrome"}, {"headless": True, "channel": "msedge"}):
-                try:
-                    browser = pw.chromium.launch(**kwargs)
-                    break
-                except Exception as exc:
-                    last_error = exc
-            if browser is None:
-                raise RuntimeError("playwright browser unavailable") from last_error
-            try:
-                page = browser.new_page(
-                    viewport={"width": target_w, "height": target_h},
-                    device_scale_factor=1.0,
-                )
-                page.set_content(html, wait_until="load")
-                locator = page.locator("#target")
-                locator.wait_for(state="visible", timeout=5000)
-                box = locator.bounding_box()
-                if not box:
-                    return None
-                return page.screenshot(
-                    type="png",
-                    clip={
-                        "x": float(box["x"]),
-                        "y": float(box["y"]),
-                        "width": float(box["width"]),
-                        "height": float(box["height"]),
-                    },
-                    omit_background=True,
-                )
-            finally:
-                browser.close()
-    except Exception:
+    if proc.returncode != 0:
         return None
-
-
-def _svg_bytes_to_png_via_cairosvg(svg_bytes: bytes, out_w: int, out_h: int) -> Optional[bytes]:
-    try:
-        import cairosvg  # type: ignore
-    except Exception:
-        try:
-            libdir = "/opt/homebrew/lib"
-            prev = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH") or ""
-            parts = [p for p in prev.split(":") if p]
-            if libdir not in parts:
-                os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join([libdir] + parts)
-            prev2 = os.environ.get("DYLD_LIBRARY_PATH") or ""
-            parts2 = [p for p in prev2.split(":") if p]
-            if libdir not in parts2:
-                os.environ["DYLD_LIBRARY_PATH"] = ":".join([libdir] + parts2)
-            for k in list(sys.modules.keys()):
-                if k == "cairosvg" or k.startswith("cairosvg.") or k == "cairocffi" or k.startswith("cairocffi."):
-                    del sys.modules[k]
-            cairosvg = importlib.import_module("cairosvg")
-        except Exception:
-            return None
-    try:
-        return cairosvg.svg2png(bytestring=svg_bytes, output_width=out_w, output_height=out_h)
-    except Exception:
-        return None
+    return proc.stdout or None
 
 
 def _svg_bytes_to_png_bytes(svg_bytes: bytes, out_w: int, out_h: int) -> Optional[bytes]:
-    png_bytes = _svg_bytes_to_png_via_playwright(svg_bytes, out_w, out_h)
-    if png_bytes is not None:
-        return png_bytes
-    return _svg_bytes_to_png_via_cairosvg(svg_bytes, out_w, out_h)
+    return _svg_bytes_to_png_via_rsvg_convert(svg_bytes, out_w, out_h)
 
 
 def _export_gradient_background_layer(
