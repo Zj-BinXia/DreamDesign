@@ -23,7 +23,6 @@ import re
 import shutil
 import subprocess
 import time
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -50,36 +49,6 @@ TONGJI_TEMPLATE_DIR = Path("/Users/bytedance/Downloads/tongjiall")
 _KIND_TEMPLATE_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
 IMAGE_LIKE_EXPORT_KINDS = {"image_png_rgba", "svg_image_png_rgba", "image_raw"}
 _CURRENT_PPT_THEME_COLORS: Dict[str, str] = {}
-
-
-# #region debug-point H2:line-visual-mismatch-export
-def _dbg_report_line_visual_mismatch(run_id: str, hypothesis_id: str, location: str, msg: str, data: Optional[Dict[str, Any]] = None) -> None:
-    try:
-        env_path = Path(__file__).resolve().parent / ".dbg" / "line-visual-mismatch.env"
-        url = "http://127.0.0.1:7777/event"
-        session_id = "line-visual-mismatch"
-        if env_path.exists():
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                if line.startswith("DEBUG_SERVER_URL="):
-                    url = line.split("=", 1)[1].strip()
-                elif line.startswith("DEBUG_SESSION_ID="):
-                    session_id = line.split("=", 1)[1].strip()
-        payload = {
-            "sessionId": session_id,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "msg": f"[DEBUG] {msg}",
-            "data": data or {},
-            "ts": int(time.time() * 1000),
-        }
-        urllib.request.urlopen(
-            urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}),
-            timeout=0.5,
-        ).read()
-    except Exception:
-        pass
-# #endregion
 
 
 def _null_object_from_template(template: Dict[str, Any]) -> Dict[str, Any]:
@@ -219,7 +188,7 @@ def _apply_kind_template(layer: Dict[str, Any]) -> Dict[str, Any]:
         return layer
     out = {key: _fill_value_from_template(template_value, layer.get(key)) for key, template_value in template.items()}
     if layer.get("saved_path"):
-        for extra_key in ("shape_xml", "fill", "line", "rotation_deg", "flip_h", "flip_v"):
+        for extra_key in ("structure_info", "shape_xml", "fill", "line", "rotation_deg", "flip_h", "flip_v"):
             if extra_key in layer:
                 out[extra_key] = layer.get(extra_key)
     return out
@@ -836,13 +805,31 @@ def _normalize_image_like_layer(layer: Dict[str, Any]) -> Dict[str, Any]:
         "caption": layer.get("caption"),
         "short_caption": layer.get("short_caption"),
     }
-    if layer.get("kind") in {"ppt_graph_geo", "ppt_graph_line"}:
-        out["shape_xml"] = layer.get("shape_xml")
-        out["fill"] = _normalize_color_template(layer.get("fill"))
-        out["line"] = _normalize_line_style_template(layer.get("line"), include_arrow_ends=True)
-        out["rotation_deg"] = layer.get("rotation_deg")
-        out["flip_h"] = layer.get("flip_h")
-        out["flip_v"] = layer.get("flip_v")
+    kind = str(layer.get("kind") or "")
+    structure_info = layer.get("structure_info")
+    if kind in {"ppt_graph_geo", "ppt_graph_line", "ppt_graph_table"} and isinstance(structure_info, dict):
+        info_out: Dict[str, Any] = {
+            "box": _normalize_box_template(structure_info.get("box")),
+            "rotation_deg": structure_info.get("rotation_deg"),
+            "flip_h": structure_info.get("flip_h"),
+            "flip_v": structure_info.get("flip_v"),
+        }
+        if kind == "ppt_graph_line":
+            info_out["shape_xml"] = _normalize_line_shape_xml_template(structure_info.get("shape_xml"))
+        elif kind == "ppt_graph_geo":
+            info_out["shape_xml"] = structure_info.get("shape_xml")
+            info_out["fill"] = _normalize_color_template(structure_info.get("fill"))
+            info_out["line"] = _normalize_line_style_template(structure_info.get("line"), include_arrow_ends=True)
+        elif kind == "ppt_graph_table":
+            col_widths = structure_info.get("col_widths_pt")
+            row_heights = structure_info.get("row_heights_pt")
+            info_out["rows"] = structure_info.get("rows")
+            info_out["cols"] = structure_info.get("cols")
+            info_out["table_style_id"] = structure_info.get("table_style_id")
+            info_out["col_widths_pt"] = list(col_widths) if isinstance(col_widths, list) else None
+            info_out["row_heights_pt"] = list(row_heights) if isinstance(row_heights, list) else None
+            info_out["cells"] = _normalize_2d_table_cells_template(structure_info.get("cells"))
+        out["structure_info"] = info_out
     return out
 
 
@@ -966,6 +953,42 @@ def _normalize_table_layer(layer: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _validate_dual_export_layer(layer: Dict[str, Any]) -> Dict[str, Any]:
+    kind = str(layer.get("kind") or "")
+    if kind not in {"ppt_graph_geo", "ppt_graph_line", "ppt_graph_table"}:
+        return layer
+
+    missing: List[str] = []
+    if not layer.get("saved_path"):
+        missing.append("saved_path")
+
+    structure_info = layer.get("structure_info")
+    if not isinstance(structure_info, dict):
+        missing.append("structure_info")
+    else:
+        if not isinstance(structure_info.get("box"), dict):
+            missing.append("structure_info.box")
+        for key in ("rotation_deg", "flip_h", "flip_v"):
+            if key not in structure_info:
+                missing.append(f"structure_info.{key}")
+        if kind in {"ppt_graph_geo", "ppt_graph_line"}:
+            if not isinstance(structure_info.get("shape_xml"), dict):
+                missing.append("structure_info.shape_xml")
+        elif kind == "ppt_graph_table":
+            if structure_info.get("rows") is None:
+                missing.append("structure_info.rows")
+            if structure_info.get("cols") is None:
+                missing.append("structure_info.cols")
+            if not isinstance(structure_info.get("cells"), list):
+                missing.append("structure_info.cells")
+
+    if missing:
+        raise RuntimeError(
+            f"{kind} dual export failed for shape={layer.get('shape_name')!r}: missing {', '.join(missing)}"
+        )
+    return layer
+
+
 def _normalize_background_fill_template(fill: Any) -> Optional[Dict[str, Any]]:
     template = {
         "type": fill.get("type") if isinstance(fill, dict) else None,
@@ -992,11 +1015,12 @@ def _normalize_slide_canvas_layer(layer: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def normalize_export_layer_to_template(layer: Dict[str, Any]) -> Dict[str, Any]:
+    layer = _validate_dual_export_layer(dict(layer))
     kind = layer.get("kind")
     if kind in IMAGE_LIKE_EXPORT_KINDS:
         normalized = _normalize_image_like_layer(layer)
         return _apply_kind_template(normalized)
-    if kind in {"ppt_graph_geo", "ppt_graph_line"} and layer.get("saved_path"):
+    if kind in {"ppt_graph_geo", "ppt_graph_line", "ppt_graph_table"} and layer.get("saved_path"):
         normalized = _normalize_image_like_layer(layer)
         if _kind_template_has_key(kind, "saved_path"):
             return _apply_kind_template(normalized)
@@ -1011,8 +1035,6 @@ def normalize_export_layer_to_template(layer: Dict[str, Any]) -> Dict[str, Any]:
         return _apply_kind_template(normalized)
     if kind == "ppt_graph_table":
         normalized = _normalize_table_layer(layer)
-        if normalized.get("saved_path"):
-            return _compact_nested_template_value(normalized) or normalized
         return _apply_kind_template(normalized)
     if kind == "slide_canvas":
         normalized = _normalize_slide_canvas_layer(layer)
@@ -3594,22 +3616,6 @@ def _line_image_box_emu(
     top = int(math.floor(min(y1, y2) - pad))
     right = int(math.ceil(max(x1, x2) + pad))
     bottom = int(math.ceil(max(y1, y2) + pad))
-    _dbg_report_line_visual_mismatch(
-        os.environ.get("TRAE_DEBUG_RUN_ID", "pre-fix"),
-        "H2",
-        "test_geo:_line_image_box_emu",
-        "line image box computed",
-        {
-            "shape_name": layer.get("shape_name"),
-            "p1": p1,
-            "p2": p2,
-            "width_emu": width_emu,
-            "pad_emu": pad,
-            "box_emu": [left, top, max(1, right - left), max(1, bottom - top)],
-            "endpoint_box_emu": [min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1)],
-            "canvas_emu": list(canvas_emu),
-        },
-    )
     return left, top, max(1, right - left), max(1, bottom - top)
 
 
@@ -3657,12 +3663,15 @@ def _save_ppt_graph_geo_svg_image_layer(
         "kind": layer.get("kind"),
         "box": _ratio_box(*placed_box_emu, canvas_emu),
         "saved_path": rendered_path,
-        "shape_xml": layer.get("shape_xml"),
-        "fill": layer.get("fill"),
-        "line": layer.get("line"),
-        "rotation_deg": layer.get("rotation_deg"),
-        "flip_h": layer.get("flip_h"),
-        "flip_v": layer.get("flip_v"),
+        "structure_info": {
+            "box": layer.get("box"),
+            "shape_xml": layer.get("shape_xml"),
+            "fill": layer.get("fill"),
+            "line": layer.get("line"),
+            "rotation_deg": layer.get("rotation_deg"),
+            "flip_h": layer.get("flip_h"),
+            "flip_v": layer.get("flip_v"),
+        },
     }
 
 
@@ -3703,31 +3712,21 @@ def _save_ppt_graph_line_svg_image_layer(
         return None
     rendered_path, rendered_box_emu = rendered
     placed_box_emu = rendered_box_emu or line_box_emu
-    _dbg_report_line_visual_mismatch(
-        os.environ.get("TRAE_DEBUG_RUN_ID", "pre-fix"),
-        "H2",
-        "test_geo:_save_ppt_graph_line_svg_image_layer",
-        "line saved as image",
-        {
-            "shape_name": layer.get("shape_name"),
-            "line_box_emu": list(line_box_emu),
-            "placed_box_emu": list(placed_box_emu),
-            "saved_path": rendered_path,
-            "image_size": list(im.size),
-        },
-    )
     return {
         "slide": layer.get("slide"),
         "shape_name": layer.get("shape_name"),
         "kind": layer.get("kind"),
         "box": _ratio_box(*placed_box_emu, canvas_emu),
         "saved_path": rendered_path,
-        "shape_xml": layer.get("shape_xml"),
-        "fill": layer.get("fill"),
-        "line": layer.get("line"),
-        "rotation_deg": layer.get("rotation_deg"),
-        "flip_h": layer.get("flip_h"),
-        "flip_v": layer.get("flip_v"),
+        "structure_info": {
+            "box": layer.get("box"),
+            "shape_xml": layer.get("shape_xml"),
+            "fill": layer.get("fill"),
+            "line": layer.get("line"),
+            "rotation_deg": layer.get("rotation_deg"),
+            "flip_h": layer.get("flip_h"),
+            "flip_v": layer.get("flip_v"),
+        },
     }
 
 
@@ -4151,15 +4150,18 @@ def extract_graph_layer(
             return None
         p1 = None
         p2 = None
+        point_source = "connector_endpoints"
         try:
             p1 = {"x": float(shp.begin_x) / cw, "y": float(shp.begin_y) / ch}
             p2 = {"x": float(shp.end_x) / cw, "y": float(shp.end_y) / ch}
         except Exception:
+            point_source = "box_rotation_fallback"
             l, t, w, h = (float(v) for v in box_emu)
             if w == 0 and h == 0:
                 p1 = {"x": l / cw, "y": t / ch}
                 p2 = {"x": l / cw, "y": t / ch}
             else:
+                flips = shape_flip_flags(shp)
                 if w == 0:
                     lp1 = (l, t)
                     lp2 = (l, t + h)
@@ -4169,6 +4171,12 @@ def extract_graph_layer(
                 else:
                     lp1 = (l, t)
                     lp2 = (l + w, t + h)
+                    if bool(flips.get("flip_h")):
+                        lp1 = (l + w, lp1[1])
+                        lp2 = (l, lp2[1])
+                    if bool(flips.get("flip_v")):
+                        lp1 = (lp1[0], t + h if lp1[1] == t else t)
+                        lp2 = (lp2[0], t + h if lp2[1] == t else t)
 
                 cx = l + (w / 2.0)
                 cy = t + (h / 2.0)
@@ -4209,7 +4217,9 @@ def extract_graph_layer(
             canvas_emu=canvas_emu,
             assets_dir=assets_dir,
         )
-        return rendered
+        if rendered is None:
+            raise RuntimeError(f"ppt_graph_line image export failed for shape={getattr(shp, 'name', None)!r}")
+        return _validate_dual_export_layer(rendered)
 
     shape_spec = _extract_sppr_custgeom_spec_from_shape_xml(shape_xml_norm, canvas_emu)
     # Fallback: preset geometry (prstGeom) and non-custGeom shapes.
@@ -4230,7 +4240,7 @@ def extract_graph_layer(
         }
         if _is_outer_page_border_graph_layer(out):
             return None
-        return _save_ppt_graph_geo_svg_image_layer(
+        rendered = _save_ppt_graph_geo_svg_image_layer(
             layer=out,
             shp=shp,
             base_box_emu=box_emu,
@@ -4239,6 +4249,9 @@ def extract_graph_layer(
             assets_dir=assets_dir,
             transform=transform,
         )
+        if rendered is None:
+            raise RuntimeError(f"ppt_graph_geo image export failed for shape={getattr(shp, 'name', None)!r}")
+        return _validate_dual_export_layer(rendered)
 
     # Extract fill/line styles. Many templates use theme colors (schemeClr) via style refs;
     # keep a compact color spec that combine.py can re-apply deterministically.
@@ -4271,7 +4284,7 @@ def extract_graph_layer(
     }
     if _is_outer_page_border_graph_layer(out):
         return None
-    return _save_ppt_graph_geo_svg_image_layer(
+    rendered = _save_ppt_graph_geo_svg_image_layer(
         layer=out,
         shp=shp,
         base_box_emu=box_emu,
@@ -4280,6 +4293,9 @@ def extract_graph_layer(
         assets_dir=assets_dir,
         transform=transform,
     )
+    if rendered is None:
+        raise RuntimeError(f"ppt_graph_geo image export failed for shape={getattr(shp, 'name', None)!r}")
+    return _validate_dual_export_layer(rendered)
 
 
 def _line_style_from_ln_el(ln_el) -> Optional[Dict[str, Any]]:
@@ -4715,6 +4731,18 @@ def _save_ppt_graph_table_image_layer(
         "kind": "ppt_graph_table",
         "box": _ratio_box(*placed_box_emu, canvas_emu),
         "saved_path": rendered_path,
+        "structure_info": {
+            "box": layer.get("box"),
+            "rotation_deg": layer.get("rotation_deg"),
+            "flip_h": layer.get("flip_h"),
+            "flip_v": layer.get("flip_v"),
+            "rows": layer.get("rows"),
+            "cols": layer.get("cols"),
+            "table_style_id": layer.get("table_style_id"),
+            "col_widths_pt": layer.get("col_widths_pt"),
+            "row_heights_pt": layer.get("row_heights_pt"),
+            "cells": layer.get("cells"),
+        },
     }
 
 
@@ -4846,9 +4874,9 @@ def extract_table_as_image_and_text_layers(
         transform=transform,
     )
     if image_layer is None:
-        return [table_layer]
+        raise RuntimeError(f"ppt_graph_table image export failed for shape={getattr(shp, 'name', None)!r}")
     text_layers = _table_cell_text_layers(table_layer, shp, canvas_emu, transform)
-    return [*text_layers, image_layer]
+    return [*text_layers, _validate_dual_export_layer(image_layer)]
 
 
 def extract_slide_background_layers(

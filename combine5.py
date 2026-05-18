@@ -2347,24 +2347,6 @@ def _add_image_layer(slide, layer: Dict[str, Any], assets_dir: Path, shift_x: fl
     slide.shapes.add_picture(str(img_path), left, top, width=width, height=height)
 
 
-def _should_rebuild_saved_geo_as_vector(layer: Dict[str, Any]) -> bool:
-    if layer.get("kind") != "ppt_graph_geo" or not layer.get("saved_path") or not layer.get("shape_xml"):
-        return False
-    box = layer.get("box")
-    if not isinstance(box, dict):
-        return False
-    try:
-        width = float(box.get("width") or 0.0)
-        height = float(box.get("height") or 0.0)
-    except Exception:
-        return False
-    if width <= 0 or height <= 0:
-        return False
-    thin = min(width, height) <= 6.0
-    aspect = max(width, height) / max(min(width, height), 0.001)
-    return thin or aspect >= 80.0
-
-
 def rebuild_ppt(
     layers_json: Path,
     assets_dir: Path,
@@ -2421,21 +2403,10 @@ def rebuild_ppt(
                 continue
             if kind == "text":
                 _add_text_layer(slide, layer, shift_x, shift_y)
-            elif kind == "ppt_graph_table":
-                if layer.get("saved_path"):
-                    _add_image_layer(slide, layer, assets_dir, shift_x, shift_y)
-                else:
-                    _add_table_layer(slide, layer, shift_x, shift_y)
-            elif kind == "ppt_graph_geo" and layer.get("saved_path"):
-                if _should_rebuild_saved_geo_as_vector(layer):
-                    _add_graph_layer(slide, layer, shift_x, shift_y)
-                else:
-                    # New test_geo.py rasterizes geo shapes to RGBA PNG assets.
-                    _add_image_layer(slide, layer, assets_dir, shift_x, shift_y)
-            elif kind == "ppt_graph_line" and layer.get("saved_path"):
+            elif kind in {"ppt_graph_table", "ppt_graph_geo", "ppt_graph_line"}:
+                if not layer.get("saved_path"):
+                    raise RuntimeError(f"{kind} rebuild requires saved_path for shape={layer.get('shape_name')!r}")
                 _add_image_layer(slide, layer, assets_dir, shift_x, shift_y)
-            elif kind in {"ppt_graph_line", "ppt_graph_geo"}:
-                _add_graph_layer(slide, layer, shift_x, shift_y)
             elif kind in {"image_png_rgba", "image_raw", "svg_image_png_rgba"}:
                 _add_image_layer(slide, layer, assets_dir, shift_x, shift_y)
             else:

@@ -1770,19 +1770,19 @@ def _render_layer(
     if kind == "text":
         return _render_text_layer(layer, canvas_size_emu, html_out.parent)
     if kind == "ppt_graph_table":
-        if layer.get("saved_path"):
-            return _render_image_layer(layer, html_out, assets_dir)
-        return _render_table_layer(layer, canvas_size_emu)
+        if not layer.get("saved_path"):
+            raise RuntimeError(f"ppt_graph_table render requires saved_path for shape={layer.get('shape_name')!r}")
+        return _render_image_layer(layer, html_out, assets_dir)
     if isinstance(kind, str) and ("image" in kind):
         return _render_image_layer(layer, html_out, assets_dir)
     if kind == "ppt_graph_line":
-        if layer.get("saved_path"):
-            return _render_image_layer(layer, html_out, assets_dir)
-        return _render_line_layer(layer)
+        if not layer.get("saved_path"):
+            raise RuntimeError(f"ppt_graph_line render requires saved_path for shape={layer.get('shape_name')!r}")
+        return _render_image_layer(layer, html_out, assets_dir)
     if kind == "ppt_graph_geo":
-        if layer.get("saved_path"):
-            return _render_image_layer(layer, html_out, assets_dir)
-        return _render_geo_layer(layer)
+        if not layer.get("saved_path"):
+            raise RuntimeError(f"ppt_graph_geo render requires saved_path for shape={layer.get('shape_name')!r}")
+        return _render_image_layer(layer, html_out, assets_dir)
     return ""
 
 
